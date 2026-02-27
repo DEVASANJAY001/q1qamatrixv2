@@ -42,7 +42,7 @@ interface RepeatsTabProps {
   matched: MatchedRepeat[];
   unmatched: UnmatchedDefect[];
   addedIds: Set<string>;
-  onFileUpload: (entries: DVXEntry[], fileName: string, mode: "code" | "semantic") => void;
+  onFileUpload: (entries: DVXEntry[], fileName: string, mode?: "code" | "semantic") => void;
   onAddToQAMatrix: (entry: QAMatrixEntry) => void;
   onClear: () => void;
   onSetAddedIds: (ids: Set<string>) => void;
@@ -68,7 +68,7 @@ const RepeatsTab = ({
   const [lastDefectUpdate, setLastDefectUpdate] = useState<string | null>(null);
   const [lastPairedDate, setLastPairedDate] = useState<string | null>(null);
   const [pairingLoading, setPairingLoading] = useState(false);
-  const [clDashView, setClDashView] = useState<"classic" | "analytics">("classic");
+  const [clDashView, setClDashView] = useState<"classic" | "analytics">("analytics");
 
   // Fetch last updated dates
   useEffect(() => {
@@ -85,7 +85,9 @@ const RepeatsTab = ({
     fetchDates();
   }, [dvxEntries]);
 
-  const handleStartPairing = async (mode: "code" | "semantic") => {
+  const [pairingMode, setPairingMode] = useState<"code" | "semantic" | null>(null);
+
+  const handleStartPairing = async () => {
     setPairingLoading(true);
     try {
       const { data: finalDefects, error } = await supabase
@@ -100,8 +102,47 @@ const RepeatsTab = ({
         return;
       }
 
-      // Convert final_defect rows to DVXEntry format for the matching engine
-      const entries: DVXEntry[] = finalDefects.map((d: any, idx: number) => ({
+      const entries: DVXEntry[] = finalDefects.map((d, idx) => ({
+        date: new Date(d.created_at).toLocaleDateString(),
+        locationCode: d.defect_location_code || "",
+        locationDetails: d.defect_location_code || "",
+        defectCode: d.defect_code || "",
+        defectDescription: d.defect_description_details?.split(" ").slice(0, 5).join(" ") || "",
+        defectDescriptionDetails: d.defect_description_details || "",
+        gravity: "",
+        quantity: 1,
+        source: d.source || "",
+        responsible: "",
+        pofFamily: "",
+        pofCode: "",
+      }));
+
+      setLastPairedDate(new Date().toISOString());
+      onFileUpload(entries, `Final Defect Data (${entries.length} records)`);
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setPairingLoading(false);
+    }
+  };
+
+  // Fetch from final_defect DB and pair by Defect Code + Location Code
+  const handlePairByCode = async () => {
+    setPairingMode("code");
+    setPairingLoading(true);
+    try {
+      const { data: finalDefects, error } = await supabase
+        .from("final_defect")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+      if (!finalDefects || finalDefects.length === 0) {
+        toast({ title: "No defect data", description: "Upload defect data first in the Defect Data page.", variant: "destructive" });
+        return;
+      }
+
+      const entries: DVXEntry[] = finalDefects.map((d: any) => ({
         date: new Date(d.created_at).toLocaleDateString(),
         locationCode: d.defect_location_code || "",
         locationDetails: d.defect_location_code || "",
@@ -117,11 +158,33 @@ const RepeatsTab = ({
       }));
 
       setLastPairedDate(new Date().toISOString());
-      onFileUpload(entries, `Final Defect Data (${entries.length} records)`, mode);
+      // Pass "code" mode → strict defect_code + location_code matching
+      onFileUpload(entries, `DB Defects — Code Match (${entries.length} records)`, "code");
     } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      toast({ title: "Pair by Code Failed", description: err.message, variant: "destructive" });
     } finally {
       setPairingLoading(false);
+      setPairingMode(null);
+    }
+  };
+
+  const handlePairBySemantic = async () => {
+    setPairingMode("semantic");
+    setPairingLoading(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("pair-by-semantic");
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      toast({
+        title: "Semantic AI Pairing Complete",
+        description: `${data.paired} paired, ${data.unpaired} not paired`,
+      });
+      handleStartPairing();
+    } catch (err: any) {
+      toast({ title: "AI Pairing Failed", description: err.message, variant: "destructive" });
+    } finally {
+      setPairingLoading(false);
+      setPairingMode(null);
     }
   };
   const fileRef = useRef<HTMLInputElement>(null);
@@ -160,7 +223,7 @@ const RepeatsTab = ({
       const workbook = XLSX.read(data, { type: "array" });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       const entries = parseDVXSheet(sheet);
-      onFileUpload(entries, file.name, "semantic");
+      onFileUpload(entries, file.name);
     };
     reader.readAsArrayBuffer(file);
   };
@@ -177,7 +240,7 @@ const RepeatsTab = ({
         setLinkError("No valid defect rows found. Make sure this is a DVX/Repeat Issues report.");
       } else {
         const name = isGoogleSheetsUrl(linkUrl) ? "Google Sheets" : linkUrl.split("/").pop() || "Link";
-        onFileUpload(entries, name, "semantic");
+        onFileUpload(entries, name);
         setLinkUrl("");
       }
     } catch (err: any) {
@@ -259,40 +322,14 @@ const RepeatsTab = ({
 
   // Get matched QA entries for the table
   const matchedSNos = useMemo(() => new Set(matched.map(m => m.qaSNo)), [matched]);
-  // matchedQAData still used by Dashboard + export button below
   const matchedQAData = useMemo(() => qaData.filter(q => matchedSNos.has(q.sNo)), [qaData, matchedSNos]);
 
-  // Build full display dataset: all 191 concerns, matched ones pinned at top
-  // with plant forced to NG and reoccurrence count added for display.
-  const displayAllData = useMemo(() => {
-    // Matched concerns: add DVX repeat count to recurrence, force plantStatus=NG
-    const matchedRows = qaData
-      .filter(d => matchedSNos.has(d.sNo))
-      .map(entry => {
-        const m = matched.find(m => m.qaSNo === entry.sNo);
-        const addedCount = m?.repeatCount || 0;
-        return {
-          ...entry,
-          recurrence: entry.recurrence + addedCount,
-          plantStatus: "NG" as const,   // reoccurrence detected → plant NG
-        };
-      })
-      .sort((a, b) => {
-        const aCount = matched.find(m => m.qaSNo === a.sNo)?.repeatCount || 0;
-        const bCount = matched.find(m => m.qaSNo === b.sNo)?.repeatCount || 0;
-        return bCount - aCount; // highest repeat count first
-      });
-    // Remaining concerns (no matched defects)
-    const otherRows = qaData.filter(d => !matchedSNos.has(d.sNo));
-    return [...matchedRows, ...otherRows];
-  }, [qaData, matched, matchedSNos]);
-
-  // Filtered display data
+  // Filtered matched data
   const sources = useMemo(() => [...new Set(qaData.map(d => d.source))].sort(), [qaData]);
   const designations = useMemo(() => [...new Set(qaData.map(d => d.designation.toUpperCase()))].sort(), [qaData]);
 
-  const filteredDisplayData = useMemo(() => {
-    let result = displayAllData;
+  const filteredMatchedData = useMemo(() => {
+    let result = matchedQAData;
     if (searchTerm) {
       const term = searchTerm.toLowerCase();
       result = result.filter(d => d.concern.toLowerCase().includes(term) || d.operationStation.toLowerCase().includes(term) || d.sNo.toString().includes(term));
@@ -303,7 +340,7 @@ const RepeatsTab = ({
     if (statusFilter === "NG") result = result.filter(d => d.workstationStatus === "NG" || d.mfgStatus === "NG" || d.plantStatus === "NG");
     if (statusFilter === "OK") result = result.filter(d => d.workstationStatus === "OK" && d.mfgStatus === "OK" && d.plantStatus === "OK");
     return result;
-  }, [displayAllData, searchTerm, sourceFilter, designationFilter, ratingFilter, statusFilter]);
+  }, [matchedQAData, searchTerm, sourceFilter, designationFilter, ratingFilter, statusFilter]);
 
   const hasActiveFilters = sourceFilter || designationFilter || statusFilter || ratingFilter || searchTerm;
   const clearAllFilters = () => { setSearchTerm(""); setSourceFilter(""); setDesignationFilter(""); setStatusFilter(""); setRatingFilter(""); };
@@ -354,25 +391,6 @@ const RepeatsTab = ({
       next.has(key) ? next.delete(key) : next.add(key);
       return next;
     });
-  };
-
-  const exportUnpaired = () => {
-    const rows = activeUnmatched.map(item => ({
-      "Defect Code": item.dvxEntry.defectCode,
-      "Location Code": item.dvxEntry.locationCode,
-      "Location Details": item.dvxEntry.locationDetails,
-      "Description": item.dvxEntry.defectDescription,
-      "Description Details": item.dvxEntry.defectDescriptionDetails,
-      "Gravity": item.dvxEntry.gravity,
-      "Quantity": item.dvxEntry.quantity,
-      "Source": item.dvxEntry.source,
-      "Responsible": item.dvxEntry.responsible,
-      "Date": item.dvxEntry.date,
-    }));
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Not Paired");
-    XLSX.writeFile(wb, "not-paired-defects.xlsx");
   };
 
   const exportUniqueDefects = () => {
@@ -426,32 +444,43 @@ const RepeatsTab = ({
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <Button
               size="sm"
               variant="outline"
               className="gap-1.5"
-              onClick={() => handleStartPairing("code")}
+              onClick={handlePairByCode}
               disabled={pairingLoading || isAIMatching}
             >
-              {pairingLoading ? (
-                <><Loader2 className="w-4 h-4 animate-spin" />Loading...</>
+              {pairingMode === "code" ? (
+                <><Loader2 className="w-4 h-4 animate-spin" />Pairing by Code...</>
               ) : (
-                <><Play className="w-4 h-4" />Pair with Code</>
+                <><Link2 className="w-4 h-4" />Pair with Code</>
               )}
             </Button>
             <Button
               size="sm"
               className="gap-1.5"
-              onClick={() => handleStartPairing("semantic")}
+              onClick={handlePairBySemantic}
               disabled={pairingLoading || isAIMatching}
             >
-              {pairingLoading ? (
-                <><Loader2 className="w-4 h-4 animate-spin" />Loading...</>
-              ) : isAIMatching ? (
+              {pairingMode === "semantic" ? (
                 <><Loader2 className="w-4 h-4 animate-spin" />AI Matching...</>
               ) : (
-                <><Brain className="w-4 h-4" />Pair with AI (Semantic)</>
+                <><Brain className="w-4 h-4" />Pair with Semantic AI</>
+              )}
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              className="gap-1.5"
+              onClick={handleStartPairing}
+              disabled={pairingLoading || isAIMatching}
+            >
+              {pairingLoading && !pairingMode ? (
+                <><Loader2 className="w-4 h-4 animate-spin" />Loading...</>
+              ) : (
+                <><Play className="w-4 h-4" />Load & Match</>
               )}
             </Button>
             {fileName && (
@@ -463,7 +492,7 @@ const RepeatsTab = ({
         </div>
 
         <p className="text-xs text-muted-foreground mb-4">
-          Use <strong>Pair with Code</strong> to match defects by Defect Code + Location Code, or <strong>Pair with AI</strong> for semantic matching. You can also upload a file manually below.
+          Use <strong>Pair with Code</strong> for exact defect_code + location_code matching, or <strong>Pair with Semantic AI</strong> for description-based intelligent matching. <strong>Load & Match</strong> fetches defect data and runs the legacy AI matcher.
         </p>
 
         {/* Mode toggle */}
@@ -538,7 +567,6 @@ const RepeatsTab = ({
 
       {dvxEntries.length > 0 && !isAIMatching && (
         <>
-
 
           {/* Unique Defects Summary */}
           <div className="bg-card border border-border rounded-lg overflow-hidden">
@@ -637,6 +665,16 @@ const RepeatsTab = ({
             )}
           </div>
 
+          {/* Pairing Container - Feature 2 */}
+          <PairingContainer
+            matched={matched}
+            unmatched={activeUnmatched}
+            qaData={qaData}
+            onUnpair={onUnpair}
+            onReassign={onReassign}
+            onManualPair={onManualPair}
+          />
+
           {/* Dashboard View Toggle */}
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-1 bg-muted rounded-lg p-0.5">
@@ -674,19 +712,8 @@ const RepeatsTab = ({
             />
           )}
 
-          {/* Pairing Container - Feature 2 */}
-          <PairingContainer
-            matched={matched}
-            unmatched={activeUnmatched}
-            qaData={qaData}
-            onUnpair={onUnpair}
-            onReassign={onReassign}
-            onManualPair={onManualPair}
-          />
-
           {matchedQAData.length > 0 && (
             <>
-
               {/* Action buttons bar */}
               <div className="flex items-center gap-2 flex-wrap">
                 <Button size="sm" variant="outline" className="gap-1.5" onClick={() => exportToXLSX(matchedQAData, "repeat-matched-export.xlsx")}>
@@ -742,20 +769,15 @@ const RepeatsTab = ({
                   </select>
                 </div>
                 {hasActiveFilters && (
-                  <p className="text-xs text-muted-foreground">Showing {filteredDisplayData.length} of {displayAllData.length} concerns ({matchedSNos.size} with reported defects)</p>
+                  <p className="text-xs text-muted-foreground">Showing {filteredMatchedData.length} of {matchedQAData.length} matched concerns</p>
                 )}
               </div>
 
-              {/* Full QA Matrix Table — matched concerns at top with NG plant */}
+              {/* Matched QA Matrix Table */}
               <div>
-                <div className="flex items-center gap-2 mb-3">
-                  <h2 className="section-header">QA Matrix — All Concerns</h2>
-                  <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-orange-500/15 text-orange-400">
-                    {matchedSNos.size} reoccurred ↑ pinned to top · plant forced NG
-                  </span>
-                </div>
+                <h2 className="section-header mb-3">Matched Concerns — QA Matrix Details</h2>
                 <QAMatrixTable
-                  data={filteredDisplayData}
+                  data={filteredMatchedData}
                   filter={null}
                   onClearFilter={() => { }}
                   onWeeklyUpdate={onWeeklyUpdate}
@@ -766,74 +788,65 @@ const RepeatsTab = ({
               </div>
             </>
           )}
-
-          {/* Unmatched / Not Paired - Feature 5: manual pairing */}
-          {activeUnmatched.length > 0 && (
-            <div className="bg-card border border-warning/30 rounded-lg overflow-hidden">
-              <div className="px-4 py-3 bg-warning/5 border-b border-warning/20 flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-warning" />
-                <h3 className="text-sm font-bold">Not Paired Concerns</h3>
-                <span className="text-xs text-muted-foreground ml-2">{activeUnmatched.length} defects not matched</span>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="ml-auto gap-1.5 text-xs h-7 border-warning/40 hover:border-warning/70"
-                  onClick={exportUnpaired}
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  Export
-                </Button>
-              </div>
-              <div className="overflow-auto" style={{ maxHeight: 400 }}>
-                <table className="w-full text-xs">
-                  <thead className="bg-muted/50 sticky top-0">
-                    <tr>
-                      <th className="px-3 py-2 text-left font-bold">Location</th>
-                      <th className="px-3 py-2 text-left font-bold">Defect Code</th>
-                      <th className="px-3 py-2 text-left font-bold">Description</th>
-                      <th className="px-3 py-2 text-left font-bold">Details</th>
-                      <th className="px-3 py-2 text-center font-bold">Gravity</th>
-                      <th className="px-3 py-2 text-center font-bold">Qty</th>
-                      <th className="px-3 py-2 text-left font-bold">Source</th>
-                      <th className="px-3 py-2 text-center font-bold">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {activeUnmatched.map((item) => (
-                      <tr key={item.id} className="border-t border-border/30 hover:bg-muted/20">
-                        <td className="px-3 py-2 max-w-[150px] truncate" title={item.dvxEntry.locationDetails}>{item.dvxEntry.locationDetails}</td>
-                        <td className="px-3 py-2 font-mono">{item.dvxEntry.defectCode}</td>
-                        <td className="px-3 py-2 max-w-[180px] truncate" title={item.dvxEntry.defectDescription}>{item.dvxEntry.defectDescription}</td>
-                        <td className="px-3 py-2 max-w-[200px] truncate" title={item.dvxEntry.defectDescriptionDetails}>{item.dvxEntry.defectDescriptionDetails}</td>
-                        <td className="px-3 py-2 text-center">
-                          <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${item.dvxEntry.gravity === "A" ? "bg-destructive/15 text-destructive" :
-                            item.dvxEntry.gravity === "B" ? "bg-warning/15 text-warning" :
-                              "bg-muted text-muted-foreground"
-                            }`}>
-                            {item.dvxEntry.gravity || "-"}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2 text-center font-mono">{item.dvxEntry.quantity}</td>
-                        <td className="px-3 py-2">{item.dvxEntry.source}</td>
-                        <td className="px-3 py-2 text-center">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-6 text-[10px] gap-1 px-2"
-                            onClick={() => openAddDialog(item)}
-                          >
-                            <Link2 className="w-3 h-3" />
-                            Pair / Add
-                          </Button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
         </>
+      )}
+
+      {/* Unmatched / Not Paired - Feature 5: manual pairing */}
+      {activeUnmatched.length > 0 && (
+        <div className="bg-card border border-warning/30 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 bg-warning/5 border-b border-warning/20 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-warning" />
+            <h3 className="text-sm font-bold">Not Paired Concerns</h3>
+            <span className="ml-auto text-xs text-muted-foreground">{activeUnmatched.length} defects not matched</span>
+          </div>
+          <div className="overflow-auto" style={{ maxHeight: 400 }}>
+            <table className="w-full text-xs">
+              <thead className="bg-muted/50 sticky top-0">
+                <tr>
+                  <th className="px-3 py-2 text-left font-bold">Location</th>
+                  <th className="px-3 py-2 text-left font-bold">Defect Code</th>
+                  <th className="px-3 py-2 text-left font-bold">Description</th>
+                  <th className="px-3 py-2 text-left font-bold">Details</th>
+                  <th className="px-3 py-2 text-center font-bold">Gravity</th>
+                  <th className="px-3 py-2 text-center font-bold">Qty</th>
+                  <th className="px-3 py-2 text-left font-bold">Source</th>
+                  <th className="px-3 py-2 text-center font-bold">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activeUnmatched.map((item) => (
+                  <tr key={item.id} className="border-t border-border/30 hover:bg-muted/20">
+                    <td className="px-3 py-2 max-w-[150px] truncate" title={item.dvxEntry.locationDetails}>{item.dvxEntry.locationDetails}</td>
+                    <td className="px-3 py-2 font-mono">{item.dvxEntry.defectCode}</td>
+                    <td className="px-3 py-2 max-w-[180px] truncate" title={item.dvxEntry.defectDescription}>{item.dvxEntry.defectDescription}</td>
+                    <td className="px-3 py-2 max-w-[200px] truncate" title={item.dvxEntry.defectDescriptionDetails}>{item.dvxEntry.defectDescriptionDetails}</td>
+                    <td className="px-3 py-2 text-center">
+                      <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${item.dvxEntry.gravity === "A" ? "bg-destructive/15 text-destructive" :
+                        item.dvxEntry.gravity === "B" ? "bg-warning/15 text-warning" :
+                          "bg-muted text-muted-foreground"
+                        }`}>
+                        {item.dvxEntry.gravity || "-"}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-center font-mono">{item.dvxEntry.quantity}</td>
+                    <td className="px-3 py-2">{item.dvxEntry.source}</td>
+                    <td className="px-3 py-2 text-center">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 text-[10px] gap-1 px-2"
+                        onClick={() => openAddDialog(item)}
+                      >
+                        <Link2 className="w-3 h-3" />
+                        Pair / Add
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
 
       {dvxEntries.length === 0 && (
@@ -842,7 +855,8 @@ const RepeatsTab = ({
           <p className="text-sm">Upload a repeat issues report to match defects against QA Matrix concerns</p>
           <p className="text-xs mt-1">Supports CSV, XLSX, and XLS files</p>
         </div>
-      )}
+      )
+      }
 
       {/* Pair / Add Dialog - Feature 5 */}
       <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
@@ -978,7 +992,7 @@ const RepeatsTab = ({
           )}
         </DialogContent>
       </Dialog>
-    </div>
+    </div >
   );
 };
 
