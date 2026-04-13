@@ -414,8 +414,8 @@ const DVXUploadSection = ({ onRefresh }: { onRefresh: () => void }) => {
                     <td className="px-2 py-1 max-w-[180px] truncate">{row.defect_description_details}</td>
                     <td className="px-2 py-1 text-center">
                       <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${row.gravity === "S" ? "bg-destructive/15 text-destructive" :
-                          row.gravity === "P" ? "bg-warning/15 text-warning" :
-                            "bg-primary/15 text-primary"
+                        row.gravity === "P" ? "bg-warning/15 text-warning" :
+                          "bg-primary/15 text-primary"
                         }`}>{row.gravity}</span>
                     </td>
                     <td className="px-2 py-1 text-center font-mono">{row.quantity}</td>
@@ -483,8 +483,8 @@ const DVXUploadSection = ({ onRefresh }: { onRefresh: () => void }) => {
                     <td className="px-2 py-1 max-w-[200px] truncate">{d.defect_description_details}</td>
                     <td className="px-2 py-1 text-center">
                       <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${d.gravity === "S" ? "bg-destructive/15 text-destructive" :
-                          d.gravity === "P" ? "bg-warning/15 text-warning" :
-                            "bg-primary/15 text-primary"
+                        d.gravity === "P" ? "bg-warning/15 text-warning" :
+                          "bg-primary/15 text-primary"
                         }`}>{d.gravity}</span>
                     </td>
                     <td className="px-2 py-1 text-center font-mono">{d.quantity}</td>
@@ -712,7 +712,6 @@ const DefectUpload = () => {
   const [loading, setLoading] = useState(true);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<"DVX" | "SCA" | "YARD" | "ALL" | "FINAL">("ALL");
-  const [deletePassword, setDeletePassword] = useState("");
   const [deleteError, setDeleteError] = useState("");
   const [deleting, setDeleting] = useState(false);
 
@@ -732,17 +731,16 @@ const DefectUpload = () => {
   };
 
   const handleDelete = async () => {
-    if (!deletePassword.trim()) { setDeleteError("Enter password"); return; }
     setDeleteError("");
     setDeleting(true);
     try {
       const { data, error } = await supabase.functions.invoke("delete-defects", {
-        body: { password: deletePassword, target: deleteTarget },
+        body: { target: deleteTarget },
       });
       if (error) throw error;
       if (data?.error) { setDeleteError(data.error); setDeleting(false); return; }
       toast({ title: "Deleted", description: `${deleteTarget} data deleted successfully.` });
-      setDeleteDialogOpen(false); setDeletePassword(""); setDeleteTarget("ALL");
+      setDeleteDialogOpen(false); setDeleteTarget("ALL");
       fetchDefects();
     } catch (err: any) {
       setDeleteError(err.message || "Delete failed");
@@ -767,7 +765,7 @@ const DefectUpload = () => {
             <p className="text-[11px] text-muted-foreground">Upload defect data for DVX, SCA, and YARD teams</p>
           </div>
           <div className="ml-auto">
-            <Button size="sm" variant="destructive" className="gap-1.5" onClick={() => { setDeleteDialogOpen(true); setDeletePassword(""); setDeleteError(""); }}>
+            <Button size="sm" variant="destructive" className="gap-1.5" onClick={() => { setDeleteDialogOpen(true); setDeleteError(""); }}>
               <Lock className="w-3.5 h-3.5" />Admin Delete
             </Button>
           </div>
@@ -820,8 +818,6 @@ const DefectUpload = () => {
               <option value="YARD">YARD Only</option>
               <option value="FINAL">Final Defect Table Only</option>
             </select>
-            <input type="password" placeholder="Admin password..." value={deletePassword} onChange={e => { setDeletePassword(e.target.value); setDeleteError(""); }}
-              className="w-full px-3 py-2 text-sm border border-input rounded-md bg-background" />
             {deleteError && <p className="text-xs text-destructive">{deleteError}</p>}
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setDeleteDialogOpen(false)}>Cancel</Button>

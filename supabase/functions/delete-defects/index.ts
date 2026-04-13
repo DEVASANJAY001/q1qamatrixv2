@@ -6,29 +6,13 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-const DELETE_PASSWORD = "STA@123";
-
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const { password, target } = await req.json();
-
-    if (!password || typeof password !== "string" || password.length > 50) {
-      return new Response(JSON.stringify({ error: "Invalid password" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    if (password !== DELETE_PASSWORD) {
-      return new Response(JSON.stringify({ error: "Incorrect password" }), {
-        status: 403,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+    const { target } = await req.json();
 
     const validTargets = ["DVX", "SCA", "YARD", "ALL", "FINAL"];
     if (!target || !validTargets.includes(target)) {
